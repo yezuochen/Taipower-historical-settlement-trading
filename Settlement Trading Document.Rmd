@@ -1,0 +1,251 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# 台灣電力交易資料
+
+## Taipower Historical Settlement Trading
+
+*Web Scrapying from 2021/11/26*
+
+在台灣電力公司的電力交易平台中，日前輔助服務市場項目中有歷史結清價格與交易量資料。電力的項目分為即時備轉以及補充備轉，得標的單位分為國營與民間，或者非交易的得標容量，而非交易的暫不考慮。而結清價格與得標容量以小時為單位，因此每一小時有即時備轉得標容量（國營）、即時備轉得標容量（民營）、即時備轉結清價格、補充備轉得標容量（國營）、補充備轉得標容量（民營）、補充備轉結清價格六筆資料。資料自2021年11月26日開始每日更新。連結為<https://etp.taipower.com.tw/web/service_market/historical_settlement_trading>。
+
+而在歷史結清價格與交易量的頁面只有每日以得標容量形成的堆疊柱狀圖加上結清價格的折線圖，滑鼠移至點上會出現容量和價格數字，目的是抓取所有的數字。在網頁前端內中有所有歷史數據，在JavaScript架構下以JSON格式儲存，目標是將資料抓取後轉成R資料格式再輸出，並且計算每日總得標容量以及每月平均電價。
+
+## Packages
+
+`rvest`是使用R進行網路爬蟲中重要的套件，`jsonlite`套件可以操作json格式的資料，`lubridate`可以進行日期時間格式的轉換，`openxlsx`可以操作excel檔案。
+
+```{R Packages}
+
+library(rvest) 
+library(magrittr) 
+library(jsonlite) 
+library(dplyr)
+library(lubridate) 
+library(openxlsx)
+
+```
+
+## Webscraping
+
+電力交易平台儲存資料的位置是網址+日期，因此需要自開始日至今日天數個網址，再進行迭代。
+
+### Create date and variables
+
+首先生成一個從2021/11/16至今天的字串向量。`date()`會將括號內的字串轉換成日期格式，`Sys.Date()`會返回當前系統的日期，`seq()`會建立序列，需要指定開始、結尾、間隔，如下表示自2021/11/16開始自今天建立序列，間隔為一天。此時生成的向量格式為日期，使用`as.character()`將日期轉換成字串，儲存為名為dat的物件。
+
+```{R date}
+
+date("2021-11-16")
+
+Sys.Date()
+
+head(seq(from = date('2021-11-16'), to = Sys.Date(), by = 1))
+
+```
+
+```{R dat}
+
+dat <- as.character(
+  seq(from = date("2021-11-16"), to = Sys.Date(), by = 1))
+
+head(dat)
+```
+
+在稍後抓取的資料中，需要選取我們需要的變量，因此先創立需要變量的向量，方便選取。`datetime`是日期時間，`sr`是即時備轉，`sup`字首是補充備轉，`Bid`字尾是得標容量（國營），`BidQse`是得標容量（民營），`price`是結清價格。得標容量的單位都是百萬瓦（MW），而價格的單位是百萬瓦/小時（元/MW·h）。
+
+```{R var}
+var <- c("datetime", "srBid", "srBidQse", "srPrice", "supBid", "supBidQse", "supPrice")
+```
+
+為了儲存下載的資料，我們創立一個空物件`df`用來儲存。
+
+```{R null}
+df <- NULL
+```
+
+### Example
+
+由於迭代的過程不易理解其中的步驟，因此我們先用2021/11/16為例，了解整個爬蟲以及資料轉換的過程後，再使用迭代方式，其實R更方便進行操作的方式是使用apply家族的函數運算，但方式稍微抽象，因此未來有機會再說明。
+
+url為我們要查詢的網址位置，為固定內容加上要查詢的日期，可以直接將該網址使用瀏覽器查詢，<https://etp.taipower.com.tw/api/infoboard/settle_value/query?startDate=2021-11-16>，可以直接到該為止，在軟體中，url多代表想要查詢的位置。
+
+```{R example url}
+
+url <- paste0("https://etp.taipower.com.tw/api/infoboard/settle_value/query?startDate=",
+              as.character(date('2021-11-16')))
+
+url
+
+```
+
+使用`rvest`套件中的`read_html()`讀取網頁，網頁是由許多節點組成，下列出現我們最初讀取到的內容。我們想要的是在節點`p`下的`data`物件。
+
+```{R read html}
+
+read_html(url)
+
+```
+
+```{R node p}
+
+read_html(url) %>% 
+  html_nodes('p')
+
+```
+
+接下來我們想要將節點內的東西轉成R的`dataframe`格式，先用`html_text()`將網頁內容轉成文字格式，再用`fromJSON`以`json`格式方式轉換。
+
+```{R json}
+
+read_html(url) %>% 
+  html_nodes('p') %>% 
+  html_text %>% 
+  fromJSON()
+
+```
+
+若是針對`json`檔案可以直接使用`url`進行查詢和轉換。
+
+```{R from json}
+
+dfi <- fromJSON(url)
+
+dfi
+
+
+```
+
+選取`json`中名為的`data`物件，則`dfi`即為一個`dataframe`物件。
+
+```{R $data}
+
+dfi <- dfi$data
+
+```
+
+在資料中分別有日期以及時間兩個變項，而我們想要將兩個變項`tranDate`、`tranHour`合成為一個日期時間`datetime`格式的變項。`ymd_hm()`可以將`year/month/day hour:minute`排列方式的資料轉換成日期時間格式，有許多不同格式相同功能的函數可以使用。`mutate`則是新增欄位，等式左邊為新增變數名，等式右邊為新增變數的內容。
+
+```{R datetime}
+
+dfi <- mutate(.data = dfi,
+              datetime = ymd_hm(paste0(tranDate, " ", tranHour)))
+
+dfi$datetime
+
+```
+
+由於資料匡中有許多不必要的變數，因此我們使用`select()`選取需要的變數，我們先前已經有用`var`儲存想要的變數，將其條件放入`select`函數中。
+
+```{R select}
+
+select(.data = dfi, var)
+
+```
+
+這就是我們需要在每天的資料中抓取的資料，將`dfi`中的內容併入`df`中，`rbind`會根據row方向合併資料框。接下來將使用迴圈完成所有操作。
+
+```{R rbind}
+
+df <- rbind(df, dfi)
+
+```
+
+### Looping
+
+```{R empty df}
+df <- NULL
+```
+
+```{R for}
+for (i in dat){
+
+url <- paste0("https://etp.taipower.com.tw/api/infoboard/settle_value/query?startDate=",
+              as.character(i))
+
+dfi <- read_html(url) %>% 
+  html_nodes("p") %>% 
+  html_text %>%
+  fromJSON
+
+dfi <- dfi$data
+
+dfi <- dfi %>% 
+  mutate(
+    datetime = ymd_hm(paste0(tranDate, " ", tranHour)))
+
+dfi <- dfi %>% select(var)
+
+df <- rbind(df, dfi)
+
+}
+
+```
+
+最後用`nrow`觀察資料的筆數，並且用`head()`查看查詢的結果。
+
+```{R nrow}
+nrow(df)
+```
+
+```{R head}
+head(df)
+```
+
+## Caculation
+
+在取得資料後，我們希望總得標容量以及月平均價格，而平均價格為每小時價格的加權平均數，以每小時得標容量為權重。
+我們使用`mutate`來新增變數，`Quant`為總容量，計算方式為得標容量（國營）加上得標容量（民營）。由於我們想計算月平均，因此我們需要先將所有資料根據月份分組。`format`可以更改物件的格式，如下表示將日期時間格式改為`年-月`格式。`%Y`為年，而`%m`為月。`str()`顯示物件的架構，若函數放入資料框，則回傳每個變數，可以看到最下方三個為剛剛新增的變數。
+
+```{R Quant}
+
+# sr: 即時備轉, sup: 補充備轉
+# Bid: 得標容量(國營)(MW), BidQse: 得標容量(民營)(MW), Price: 結清價格(元 / MW·h)
+# Quant = Bid + BidQse
+
+df <- df %>% mutate(month = format(df$datetime, "%Y-%m"), 
+                    srQuant = srBid + srBidQse, 
+                    supQuant = supBid + supBidQse)
+
+str(df)
+```
+
+先使用`group_by`將所有資料根據`month`分組，接著將分組後的資料傳遞給`summarise()`函數，`summarise`會回傳計算後的統計值。`weighted.mean()`可以計算加權平均數，參數`w`指定為要使用的權重，`na.rm`則指定是否略過遺漏值，因為遺漏值無法被計算。`w.avg.srPrice`為即時備轉月加權平均價格，`w.avg.supPrice`為補充備轉月加權平均價格。
+
+```{R weighted mean}
+
+month_w_avg_price <- df %>% 
+  group_by(month) %>% 
+  summarise(
+    w.avg.srPrice = weighted.mean(srPrice, w = srQuant, na.rm = TRUE),
+    w.avg.supPrice = weighted.mean(supPrice, w = supQuant, na.rm = TRUE))
+
+month_w_avg_price
+```
+
+```{R across}
+# mean without weight and advanced method
+# df %>% 
+#   group_by(month) %>% 
+#   summarise( 
+#     across(ends_with("Price"), mean, na.rm = TRUE, .names = "avg.{.col}"))
+```
+
+## Output
+
+`setwd`指定我們要儲存資料的資料夾位置。
+最後我們需要將整個資料框和計算結果合併成一個`excel`檔案，並且存於不同的活頁簿，剛好`list`格式可以方便對應到`excel`的輸出形式。我們在一個`list`中建立兩個元素，一個是名為歷史結清價格與交易量的`df`物件，另一個是名為月均價的`month_w_avg_price`物件。最後使用`write.xlsx`將這個`list`匯出為`excel`檔案，指定檔案名為"歷史結清價格與交易量.xlsx"。
+接下來就可以到資料夾內查看輸出的`excel`檔案。
+
+```{R export}
+setwd("~/Desktop/R/CIER/電力交易平台")
+
+output <- list(歷史結清價格與交易量 = df, 月均價 = month_w_avg_price)
+
+str(output)
+
+write.xlsx(output, file = "歷史結清價格與交易量.xlsx")
+```
